@@ -36,6 +36,70 @@
   "Some utils templates for different type of notes such us time notes
 or sratch notes")
 
+(defun dendroam-replace-dot-with-tilde (input-str)
+  "逐一对字符串中的字符进行判断，如果句号处于数字之间，则将句号替换为~号。"
+  (let ((output-str "")
+        (len (length input-str))
+        (i 0))
+    (while (< i len)
+      (let ((current-char (aref input-str i))
+            (next-char (if (< (1+ i) len) (aref input-str (1+ i)) nil))
+            (after-next-char (if (< (+ i 2) len) (aref input-str (+ i 2)) nil)))
+        (if (and (>= current-char ?0) (<= current-char ?9)
+                 (and next-char (char-equal next-char ?.)
+                      (and after-next-char (>= after-next-char ?0) (<= after-next-char ?9))))
+            (progn
+              (setq output-str (concat output-str (char-to-string current-char) "~"))
+              (setq i (1+ i))) ; Skip the next character (the dot)
+          (setq output-str (concat output-str (char-to-string current-char))))
+        (setq i (1+ i))))
+    output-str))
+
+(defun dendroam-replace-tilde-with-dot (input-str)
+  "逐一对字符串中的字符进行判断，如果~号处于数字之间，则将句号替换为句号。"
+  (let ((output-str "")
+        (len (length input-str))
+        (i 0))
+    (while (< i len)
+      (let ((current-char (aref input-str i))
+            (next-char (if (< (1+ i) len) (aref input-str (1+ i)) nil))
+            (after-next-char (if (< (+ i 2) len) (aref input-str (+ i 2)) nil)))
+        (if (and (>= current-char ?0) (<= current-char ?9)
+                 (and next-char (char-equal next-char ?~)
+                      (and after-next-char (>= after-next-char ?0) (<= after-next-char ?9))))
+            (progn
+              (setq output-str (concat output-str (char-to-string current-char) "."))
+              (setq i (1+ i))) ; Skip the next character (the tidle)
+          (setq output-str (concat output-str (char-to-string current-char))))
+        (setq i (1+ i))))
+    output-str))
+
+(defun dendroam-capitalize-title-words (title)
+  "Capitalize the first word of the TITLE and words after '.', '?', ':', ';', '!'."
+  (let* ((words (split-string title " "))
+         (result '())
+         (capitalize-next t))
+    (dolist (word words)
+      (when (not (string-empty-p word))
+        (push (if capitalize-next
+                  (progn
+                    (setq capitalize-next nil)
+                    (capitalize word))
+                word)
+              result)
+        (when (string-match-p "[.?:;!]" (substring word -1))
+          (setq capitalize-next t))))
+    (setq result (nreverse result))
+    (string-join result " ")))
+
+(defun dendroam-url-encode-special-chars (string)
+  "Encode special characters in STRING using URL encoding."
+  (replace-regexp-in-string
+   "[?:;! ]"
+   (lambda (char)
+     (format "%%%02x" (string-to-char char)))
+   string))
+
 ;;Node custom getters
 (cl-defmethod org-roam-node-current-file (node)
   "Gets node file-name-base by file name"
@@ -43,12 +107,19 @@ or sratch notes")
 
 (cl-defmethod org-roam-node-hierarchy-title (node)
   "Gets node title excluding the hierarchy and capitalize it"
-  (capitalize
-   (car
-    (last
-     (split-string
-      (org-roam-node-title node)
-      "\\.")))))
+  (dendroam-replace-tilde-with-dot
+   (dendroam-capitalize-title-words
+    (car
+     (last
+      (split-string
+       (dendroam-replace-dot-with-tilde
+        (org-roam-node-title node)) "\\."))))))
+;; (capitalize
+;;  (car
+;;   (last
+;;    (split-string
+;;     (org-roam-node-title node)
+;;     "\\.")))))
 
 (defun dendroam-format-hierarchy (file)
   "Formats node's path, to get the hierarchy whithout the title
@@ -56,7 +127,10 @@ where title will be the last child of the hierarchy:
 from the filename this.is.a.hierarchy.note-title.org
 returns this.is.a.hierarchy"
   (let* ((base-name (file-name-base file))
-         (hierarchy-no-title (file-name-base base-name)))
+         (hierarchy-no-title
+          (dendroam-replace-tilde-with-dot
+           (file-name-base
+            (dendroam-replace-dot-with-tilde base-name)))))
     hierarchy-no-title))
 
 (cl-defmethod org-roam-node-hierarchy (node)
@@ -109,14 +183,31 @@ the current file"
 (defun dendroam-refactor-file ()
   (interactive)
   (let* ((initial-file (buffer-file-name))
-         (initial-slug (file-name-base initial-file))
+         (initial-slug (url-unhex-string (file-name-base initial-file)))
+         (initial-directory (file-name-directory (buffer-file-name)))
          (new-slug (read-string "Refactor: " initial-slug))
          (new-file (concat
-                    (expand-file-name new-slug org-roam-directory)
+                    (expand-file-name (dendroam-url-encode-special-chars new-slug) initial-directory)
                     ".org")))
-    (rename-file initial-file new-file)
+    (message "new-file是: %s" new-file)
+    (setq new-title (file-name-base
+                     (replace-regexp-in-string
+                      (concat
+                       initial-directory
+                       (dendroam-url-encode-special-chars (dendroam-format-hierarchy new-file))
+                       ".") "" new-file)))
+    (dendroam-update-org-title (dendroam-capitalize-title-words (url-unhex-string new-title)))
+    (save-buffer)
+    (rename-file initial-file  new-file)
     (kill-current-buffer)
     (find-file new-file)))
+
+(defun dendroam-update-org-title (new-title)
+  "Update the #+title in the current org file."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^#\\+title:.*$" nil t)
+      (replace-match (format "#+title: %s" new-title)))))
 
 ;; Useful notes functions
 (defun dendroam-insert-time-note(&optional goto)
@@ -175,10 +266,18 @@ The file is created using a template from `dendroam-capture-templates'"
                                                       (seq-remove #'nonspacing-mark-p
                                                                   (string-glyph-decompose s)))))
                   (cl-replace (title pair) (replace-regexp-in-string (car pair) (cdr pair) title)))
-         (let* ((pairs `(("[^[:alnum:][:digit:]-.]" . "_") ;; convert anything not alphanumeric
+         (let* ((pairs `(("[^[:alnum:][:digit:].-?:;! ]" . "_") ;; convert anything not alphanumeric
                          ("__*" . "_")                   ;; remove sequential underscores
                          ("^_" . "")                     ;; remove starting underscore
-                         ("_$" . "")))                   ;; remove ending underscore
+                         ("_$" . "")                     ;; remove ending underscore
+                         ("[?]" . "%3F")                 ;; replace "?" with its URL encoding "%3F"
+                         ("[:]" . "%3A")                 ;; replace ":" with its URL encoding "%3A"
+                         ("[;]" . "%3B")                 ;; replace ";" with its URL encoding "%3B"
+                         ("[!]" . "%21")                 ;; replace "!" with its URL encoding "%21"
+                         (" " . "%20")))                 ;; replace space with its URL encoding "%20"
                 (slug (-reduce-from #'cl-replace (strip-nonspacing-marks title) pairs)))
            (downcase slug))))))
+
+
+
 ;;; dendroam.el ends here
